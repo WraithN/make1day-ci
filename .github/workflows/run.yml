@@ -1,0 +1,107 @@
+name: private-ci
+
+# Public CI shell. NO product source lives in this repository.
+#
+# It checks out the private source with a READ-ONLY deploy key and runs the
+# heavy matrix here, so the private repository does not spend its included
+# Actions minutes. Trigger manually only; logs are public by design.
+#
+# Required repository secrets:
+#   PRIVATE_REPO             owner/name of the private repository
+#   PRIVATE_REPO_DEPLOY_KEY  private half of a read-only ed25519 deploy key
+
+on:
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: "all = every matrix case (tsc); or one case id with --build"
+        required: true
+        default: "all"
+        type: string
+      full_build:
+        description: "Run a real next build for EVERY case (slow)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-ci
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout private source (read-only)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.PRIVATE_REPO }}
+          ssh-key: ${{ secrets.PRIVATE_REPO_DEPLOY_KEY }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install (lockfile)
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Unit tests
+        run: npm test
+
+      - name: i18n parity
+        run: node scripts/i18n-parity.mjs
+
+      - name: Agent contract
+        run: node scripts/agents-lint.mjs
+
+      - name: Build matrix
+        env:
+          LICENSE_GATE: "off"
+          NEXT_PUBLIC_SITE_URL: http://127.0.0.1:3000
+          NEXT_TELEMETRY_DISABLED: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          npx next dev -p 3000 > /tmp/make1day-dev.log 2>&1 &
+          DEV_PID=$!
+          trap 'kill "$DEV_PID" 2>/dev/null || true' EXIT
+
+          ready=0
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:3000/api/health >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            if ! kill -0 "$DEV_PID" 2>/dev/null; then
+              echo "dev server exited early"
+              exit 1
+            fi
+            sleep 2
+          done
+
+          if [ "$ready" -ne 1 ]; then
+            echo "dev server did not become ready"
+            exit 1
+          fi
+
+          if [ "${{ inputs.scope }}" = "all" ]; then
+            if [ "${{ inputs.full_build }}" = "true" ]; then
+              node scripts/verify-matrix.mjs --all --build --base http://127.0.0.1:3000
+            else
+              node scripts/verify-matrix.mjs --all --base http://127.0.0.1:3000
+            fi
+          else
+            node scripts/verify-matrix.mjs --case "${{ inputs.scope }}" --build --base http://127.0.0.1:3000
+          fi
