@@ -1,0 +1,39 @@
+name: cron-webhook-retry
+
+# Free scheduler for the production webhook-retry endpoint. Keeping this in
+# the public shell means the private repository does not spend Actions minutes
+# on a 15-minute schedule.
+#
+# Required repository secret: CRON_SECRET (same value as the Vercel env var).
+# Optional repository variable: SITE_URL (defaults to https://www.make1day.dev).
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cron-webhook-retry
+  cancel-in-progress: false
+
+jobs:
+  retry:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /api/cron/webhook-retry
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          SITE: ${{ vars.SITE_URL || 'https://www.make1day.dev' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CRON_SECRET:-}" ]; then
+            echo "CRON_SECRET is not configured; skipping."
+            exit 0
+          fi
+          curl -fsS -X POST "$SITE/api/cron/webhook-retry" \
+            -H "Authorization: Bearer $CRON_SECRET" \
+            -H "Content-Type: application/json" \
+            --data '{}'
